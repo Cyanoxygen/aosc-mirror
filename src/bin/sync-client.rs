@@ -1,0 +1,198 @@
+use std::{fs::read_to_string, net::SocketAddr, path::PathBuf, sync::Arc};
+
+use aosc_mirror::{metadata::split_inrelease, *};
+
+use anyhow::{Context, Ok, Result, anyhow, bail};
+use base64::prelude::*;
+use clap::{Parser, Subcommand, command};
+use config::AppConfig;
+use ed25519_dalek::VerifyingKey;
+use log::{error, info};
+use metadata::fetch_manifest;
+use reqwest::{Client, redirect::Policy};
+use server::build_server;
+use tokio::{net::TcpListener, sync::RwLock, task::JoinSet};
+use verify::{init_pgp_keyringstore, verify_pgp_signature};
+
+use crate::{config::check_config, metadata::AptRepoReleaseInfo};
+pub use server::SyncRequestBody;
+
+
+
+#[derive(Clone, Subcommand)]
+/// The Mirror Sync Client
+pub enum AppAction {
+	/// Perform the full sync
+	Sync,
+	/// Start the daemon and listen to the sync requests
+	Daemon,
+}
+
+#[derive(Parser)]
+#[command(version, about)]
+pub struct Cmdline {
+	#[arg(short = 'c', long = "config")]
+	/// Path to the config file
+	pub config_file: PathBuf,
+	#[command(subcommand)]
+	/// Action to execute
+	pub action: AppAction,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+	env_logger::init();
+	// console_subscriber::init();
+	info!("AOSC OS Mirror Sync Client");
+	info!("Please wait, while we perform some checks ...");
+	let cmdline = match Cmdline::try_parse() {
+		Result::Ok(args) => args,
+		Err(e) => {
+			// Do not let anyhow to handle this error
+			eprintln!("{}", e);
+			// let it handle this "error" instead
+			bail!("Invalid usage");
+		}
+	};
+	let config_file = &cmdline.config_file;
+
+	let config: AppConfig = toml::from_str(&read_to_string(config_file)?)
+		.context("Unable to read the config file")?;
+	let config = Arc::new(config);
+
+	let errors = check_config(&config);
+	if !errors.is_empty() {
+		let mut error_str = String::from("Error(s) found in config file:\n");
+		for e in errors {
+			// Build error string
+			let mut chain = 1;
+			error_str.push_str(&format!("- {}\n", e));
+			e.chain().skip(1).for_each(|c| {
+				error_str.push_str(&format!("{}> {}\n", "  ".repeat(chain), c));
+				chain += 1;
+			});
+		}
+		error!("{}", error_str);
+		bail!("Error(s) found in the config file. Refer to the log above for details.")
+	}
+
+	// Deserialize server public keys
+	let mut server_pubkeys = Vec::new();
+	for pubkey in &config.server_pubkeys {
+		let bytes = BASE64_STANDARD
+			.decode(pubkey)
+			.context("Failed to decode server public key as base64 text")?;
+		let bytes: [u8; 32] = bytes.try_into().map_err(|_| anyhow!("Unexpected length; Public keys must be 32 bytes long (that is 45 charaters in base64 with padding"))?;
+		let pubkey = VerifyingKey::from_bytes(&bytes)?;
+		server_pubkeys.push(pubkey);
+	}
+	let server_pubkeys = Arc::new(server_pubkeys);
+
+	// Initialize the APT trusted keystore.
+	let keyring_dir = &config.keyring_dir;
+	let (keyring_store, _certstore) = init_pgp_keyringstore(keyring_dir).await?;
+	let keyring_store = Arc::new(keyring_store);
+
+	let base_url = config.http_url.clone();
+	let client = Client::builder()
+		.user_agent("Debian APT-HTTP/1.3 (3.0.1)")
+		.redirect(Policy::limited(10))
+		.build()?;
+	// Download the InRelease files before starting, and make sure it can be verified
+	// by the keys from the given keystore.
+	info!("Checking the validity of the repository metadata ...");
+	let mut errors = Vec::new();
+	for suite in &config.suites {
+		if let Err(e) = {
+			info!(
+				"Fetching the InRelease file for suite '{}' from '{}' ...",
+				suite, &base_url
+			);
+			let (inrelease, release) =
+				fetch_manifest(base_url.clone(), suite.clone(), &client).await?;
+			let info = if let Some(inrelease) = inrelease {
+				let (inrelease_body, inrelease_sig) = split_inrelease(&inrelease);
+				verify_pgp_signature(
+					&inrelease_body,
+					&inrelease_sig,
+					&keyring_store,
+				)?;
+				if let Some((release, sig)) = release {
+					verify_pgp_signature(&release, &sig, &keyring_store)?;
+				}
+				AptRepoReleaseInfo::parse_from(&inrelease_body)?
+			} else if let Some((release, sig)) = release {
+				verify_pgp_signature(&release, &sig, &keyring_store)?;
+				AptRepoReleaseInfo::parse_from(&release)?
+			} else {
+				bail!(
+					"No valid InRelease/Release found in the specified repository"
+				);
+			};
+			let diff: Vec<_> = config
+				.archs
+				.iter()
+				.filter(|x| !info.archs.contains(x))
+				.collect();
+			if !diff.is_empty() {
+				bail!(anyhow!(
+					"Found architecture(s) not supported by this repo: {:?}",
+					diff
+				)
+				.context(format!(
+					"The following architectures are supported:\n{:?}",
+					info.archs
+				)));
+			};
+			Ok(())
+		} {
+			errors.push(e);
+		}
+	}
+	if !errors.is_empty() {
+		let mut error_str = String::from("Error(s) found in config file:\n");
+		for e in errors {
+			let mut chain = 1;
+			error_str.push_str(&format!("- {}\n", e));
+			e.chain().skip(1).for_each(|c| {
+				error_str.push_str(&format!("{}> {}\n", "  ".repeat(chain), c));
+				chain += 1;
+			});
+		}
+		error!("{}", error_str);
+		bail!(
+			"Your config file does not align with the upstream repository. See the log above for details."
+		)
+	}
+
+	// Start the server
+	info!("Starting server ...");
+
+	// Mutable shared state to share across different async tasks.
+	let state = Arc::new(RwLock::new(AppState {
+		syncing: false,
+		config: config.clone(),
+		last_sync_timestamp: 0,
+		last_sync_status: server::Status::Success,
+		last_sync_message: String::new(),
+		server_pubkeys,
+		keyring_store,
+		client,
+	}));
+	let s = build_server(state).into_make_service_with_connect_info::<SocketAddr>();
+	let mut tasks = JoinSet::new();
+	// let mut tasks = Vec::new();
+	for addr in &config.listen {
+		let listener = TcpListener::bind(addr)
+			.await
+			.context(format!("Failed to bind to {}", addr))?;
+		info!("Listening on {}", addr);
+		let s = s.clone();
+		tasks.spawn(async move { axum::serve(listener, s).await });
+	}
+	info!("Sync server started, waiting for requests ...");
+	while let Some(r) = tasks.join_next().await {
+		r??;
+	}
+	Ok(())
+}

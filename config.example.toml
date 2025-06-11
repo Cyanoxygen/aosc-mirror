@@ -1,0 +1,80 @@
+# sync-client Configuration
+# General settings
+# ================
+#
+# hostname
+# --------
+# Specifies the hostname of the current mirror server. This is used to generate project/trace information.
+# Debian only.
+hostname = "localhost"
+
+# listen
+# ------
+# Specifies which address and port this client should listen to. This client exposes a HTTP server on the sockets.
+# You can specify multiple address:port pairs.
+listen = ["127.0.0.1:1234", "10.123.0.1:1234"]
+
+# server_pubkeys
+# --------------
+# List of Ed25519 public keys this client should trust. The client will verify the signature in the /do-sync request.
+server_pubkeys = []
+
+# skip_verification
+# -----------------
+# Setting this to true will skip the signature check for the sync request. The InRelease/Release files are still checked.
+skip_verification = false
+
+# mode
+# ----
+# Specifies the operation mode, can be `"aosc"` and `"debian"`. Currently Debian mode is WIP.
+# For AOSC mode, it allows you to mirror topics.
+# For Debian mode, it takes extra steps while processing the metadata, and the tracing information will be generated.
+mode = "aosc"
+
+# mirror_url
+# ----------
+# The rsync endpoint to the upstream mirror.
+# Should be one like this: `rsync://example.com/anthon/debs/` (for AOSC),
+# or `rsync://ftp.us.debian.org/debian/` (for Debian).
+# Note: Make sure dists/ and pool/ are in the specified path.
+# Note: Due to the limitation of URLs, you MUST make sure the URL ends with a slash ("/").
+mirror_url = "rsync://repo-hk.aosc.io/anthon/debs/"
+
+# http_url
+# --------
+# The HTTP endpoint of the upstream mirror.
+# Should be one like this: `https://repo-hk.aosc.io/anthon/debs/` (for AOSC),
+# or `https://ftp.us.debian.org/debian/` (for Debian).
+# Make sure dists/ and pool/ are in the specified path.
+# Note: Due to the limitation of URLs, you MUST make sure the URL ends with a slash ("/").
+http_url = "https://repo-hk.aosc.io/anthon/debs/"
+
+# mirror_root
+# -----------
+# The root directory to store mirrored files.
+# dists/ and pool/ will be downloaded to this directory.
+mirror_root = "/mirror/anthon/debs"
+
+# keyring_dir
+# -----------
+# Directory containing the PGP key(s) that is used to sign the Release/InRelease file.
+# For AOSC, if you are running this on AOSC OS, just point to /etc/apt/trusted.gpg.d.
+# For Debian/Ubuntu, you may point to /usr/share/keyrings.
+keyring_dir = "/etc/apt/trusted.gpg.d"
+
+# suites
+# ------
+# List of suites to mirror. Ignored in AOSC mode.
+# suites = ["stable", "stable-updates", "stable-backports", "sid"]
+
+# archs
+# -----
+# List of architectures to mirror.
+archs = ["all", "amd64", "arm64", "loongarch64", "loongson3", "riscv64", "ppc64el"]
+
+# parallel_jobs
+# -------------
+# Number of concurrent download tasks.
+# Should be in `[1, 16]`.
+# WARNING: Too much will get you banned from the upstream server.
+parallel_jobs = 4
