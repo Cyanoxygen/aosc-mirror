@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
 
 	// Initialize the APT trusted keystore.
 	let keyring_dir = &config.keyring_dir;
-	let (keyring_store, _certstore) = init_pgp_keyringstore(keyring_dir).await?;
+	let keyring_store = init_pgp_keyringstore(keyring_dir).await?;
 	let keyring_store = Arc::new(keyring_store);
 
 	let base_url = config.http_url.clone();

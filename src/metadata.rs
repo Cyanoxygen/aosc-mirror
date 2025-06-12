@@ -10,6 +10,7 @@ use deb822_lossless::Deb822;
 use futures_util::StreamExt;
 use log::{debug, info, warn};
 use reqwest::Client;
+use sequoia_openpgp::types::HashAlgorithm;
 use tokio::{
 	fs::{File, create_dir_all, symlink},
 	io::{AsyncWriteExt, BufWriter, copy},
@@ -50,6 +51,17 @@ impl AptMetadataHashAlgm {
 			_ => {
 				bail!("Invalid string {}", v);
 			}
+		}
+	}
+}
+
+impl From<AptMetadataHashAlgm> for HashAlgorithm {
+	fn from(value: AptMetadataHashAlgm) -> Self {
+		match value {
+			AptMetadataHashAlgm::SHA256 => HashAlgorithm::SHA256,
+			AptMetadataHashAlgm::SHA512 => HashAlgorithm::SHA512,
+			AptMetadataHashAlgm::SHA1 => HashAlgorithm::SHA1,
+			AptMetadataHashAlgm::MD5 => HashAlgorithm::MD5,
 		}
 	}
 }
@@ -233,10 +245,9 @@ async fn download_metadata_inner(
 		if local_file.is_file() {
 			let path = local_file.clone();
 			let hash = hash.clone();
-			if tokio::task::spawn_blocking(move || {
-				checksum_file(algm, path, hash)
-			})
-			.await?.is_ok()
+			if tokio::task::spawn_blocking(move || checksum_file(algm, path, hash))
+				.await?
+				.is_ok()
 			{
 				info!(
 					"[{}/{}] '{}' is up to date.",

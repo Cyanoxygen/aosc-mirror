@@ -3,7 +3,6 @@ use std::{
 	fs::{File, read},
 	io::Read,
 	path::Path,
-	sync::Arc,
 	time::SystemTime,
 };
 
@@ -11,7 +10,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use ed25519_dalek::{Signature, VerifyingKey};
 use log::{debug, info, warn};
-use sequoia_cert_store::{CertStore, LazyCert, StoreUpdate};
 use sequoia_openpgp::{
 	Cert, KeyHandle, KeyID,
 	armor::{self, ReaderMode},
@@ -69,14 +67,11 @@ pub struct PgpKeyringStoreEnt {
 
 pub type PgpKeyringStore = HashMap<KeyID, PgpKeyringStoreEnt>;
 
-pub async fn init_pgp_keyringstore(
-	keystore_dir: &dyn AsRef<Path>,
-) -> Result<(PgpKeyringStore, CertStore)> {
+pub async fn init_pgp_keyringstore(keystore_dir: &dyn AsRef<Path>) -> Result<PgpKeyringStore> {
 	info!("Initializing APT trusted keys ...");
 	info!("- Using directory {}", keystore_dir.as_ref().display());
 	let walkdir = WalkDir::new(keystore_dir).max_depth(2).follow_links(true);
 	let mut keyring_store = PgpKeyringStore::new();
-	let store2 = CertStore::empty();
 	for ent in walkdir.into_iter() {
 		let ent = ent?;
 		if !ent.file_type().is_file() {
@@ -145,7 +140,6 @@ pub async fn init_pgp_keyringstore(
 				continue;
 			}
 			debug!("Registering {} {}", &key_id, &first_uid);
-			store2.update(Arc::new(LazyCert::from(cert.clone())))?;
 			let ent = PgpKeyringStoreEnt {
 				uid: first_uid,
 				cert,
@@ -154,7 +148,7 @@ pub async fn init_pgp_keyringstore(
 		}
 	}
 	info!("{} keys in the APT trusted keystore.", keyring_store.len());
-	Ok((keyring_store, store2))
+	Ok(keyring_store)
 }
 
 pub fn verify_pgp_signature(
