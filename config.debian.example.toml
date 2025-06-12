@@ -1,0 +1,14 @@
+listen = ["127.0.0.1:1234"]
+server_pubkeys = ["xSCzjvn4xzh/NfTFk5BROZFC8mtYRmttPobF7wRr3r8="]
+allow_localhost = true
+mode = "debian"
+keyring_dir = "/usr/share/keyrings"
+hostname = "mirrors.example.com"
+
+suites = ["stable", "stable-updates", "stable-backports"]
+parallel_jobs = 4
+archs = ["amd64", "all"]
+mirror_url = "rsync://ftp.hk.debian.org/debian/"
+http_url = "https://ftp.debian.org/debian/"
+mirror_root = "/mirror/debian"
+mirror_topics = true

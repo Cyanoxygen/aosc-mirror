@@ -1,0 +1,12 @@
+hostname = "localhost"
+listen = ["127.0.0.1:1234"]
+server_pubkeys = ["xSCzjvn4xzh/NfTFk5BROZFC8mtYRmttPobF7wRr3r8="]
+skip_verification = false
+mode = "aosc"
+keyring_dir = "/etc/apt/trusted.gpg.d"
+
+mirror_url = "rsync://repo-hk.aosc.io/anthon/debs/"
+http_url = "https://repo-hk.aosc.io/anthon/debs/"
+mirror_root = "/mirror/anthon/debs"
+mirror_topics = false
+parallel_jobs = 4
