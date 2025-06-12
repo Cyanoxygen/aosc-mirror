@@ -2,6 +2,7 @@ use std::{
 	fs::File,
 	io::{BufRead, BufReader},
 	path::PathBuf,
+	sync::Arc,
 };
 
 use anyhow::{Result, bail};
@@ -11,12 +12,16 @@ use sha2::{Sha256, Sha512};
 
 use crate::metadata::AptMetadataHashAlgm;
 
-pub fn checksum_file(algm: AptMetadataHashAlgm, path: PathBuf, expected: String) -> Result<()> {
+pub fn checksum_file(
+	algm: AptMetadataHashAlgm,
+	path: Arc<PathBuf>,
+	expected: Arc<String>,
+) -> Result<()> {
 	let fd = File::options()
 		.read(true)
 		.write(false)
 		.create(false)
-		.open(&path)?;
+		.open(path.as_path())?;
 	let mut reader = BufReader::with_capacity(128 * 1024, fd);
 	let hash_value = match algm {
 		AptMetadataHashAlgm::MD5 => {
@@ -59,7 +64,7 @@ pub fn checksum_file(algm: AptMetadataHashAlgm, path: PathBuf, expected: String)
 			str_digest
 		}
 	};
-	if hash_value != expected {
+	if hash_value != *expected {
 		bail!(
 			"{:?} Checksum verification failed.\nExpected: {}\nActual:   {}",
 			algm,

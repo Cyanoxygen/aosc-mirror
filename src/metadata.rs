@@ -1,7 +1,8 @@
 use std::{
-	collections::HashMap,
+	collections::{HashMap, HashSet},
 	io::{BufRead, BufReader},
 	path::PathBuf,
+	sync::Arc,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -26,7 +27,7 @@ const SIG_MAGIC: &str = "-----BEGIN PGP SIGNATURE-----";
 pub type PackageFileEntry = String;
 pub type PackageFileList = Vec<PackageFileEntry>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum AptMetadataHashAlgm {
 	// Used by Debian and Ubuntu
 	MD5,
@@ -208,28 +209,57 @@ pub async fn fetch_manifest(
 	Ok((inrelease, release))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_metadata_inner(
 	base_url: Url,
 	queue: HashMap<PathBuf, (u32, String)>,
 	algm: AptMetadataHashAlgm,
+	timestamp: i64,
 	dst: PathBuf,
+	suite: String,
 	client: Client,
 	total_files: u32,
 ) -> Result<()> {
+	let tmp_dst = Arc::new(dst.join(format!("dists-{}/{}", timestamp, &suite)));
+	let dst = Arc::new(dst.join(format!("dists/{}/", &suite)));
 	for f in queue {
-		let path = f.0;
-		let hash = f.1.1;
-		let http_url = base_url.join(&path.to_string_lossy())?;
-		let local_file = dst.join(&path);
-		let dir = local_file.parent().context("Invalid path")?;
-		let algm = algm.clone();
+		let rel_path = Arc::new(f.0);
+		let hash = Arc::new(f.1.1);
+		let http_url = base_url.join(&rel_path.to_string_lossy())?;
+		let local_file = Arc::new(dst.join(rel_path.as_path()));
+		let tmpdist_local_file = Arc::new(tmp_dst.join(rel_path.as_path()));
+		let dir = tmpdist_local_file.parent().context("Invalid path")?;
 		create_dir_all(dir).await?;
+		if local_file.is_file() {
+			let path = local_file.clone();
+			let hash = hash.clone();
+			if tokio::task::spawn_blocking(move || {
+				checksum_file(algm, path, hash)
+			})
+			.await?.is_ok()
+			{
+				info!(
+					"[{}/{}] '{}' is up to date.",
+					f.1.0,
+					total_files,
+					rel_path.display()
+				);
+				tokio::fs::copy(local_file.as_path(), tmpdist_local_file.as_path())
+					.await
+					.context(format!(
+						"Failed to copy '{}' to '{}'",
+						local_file.display(),
+						tmpdist_local_file.display()
+					))?;
+				continue;
+			};
+		}
 		let dst_fd = File::options()
 			.create(true)
 			.append(false)
 			.truncate(true)
 			.write(true)
-			.open(&local_file)
+			.open(tmpdist_local_file.clone().as_path())
 			.await?;
 		let mut writer = BufWriter::with_capacity(1024 * 1024, dst_fd);
 		client.head(http_url.clone())
@@ -243,14 +273,15 @@ async fn download_metadata_inner(
 			copy(&mut &chunk[..], &mut writer).await?;
 		}
 		writer.flush().await?;
-		let handle =
-			tokio::task::spawn_blocking(move || checksum_file(algm, local_file, hash));
+		let handle = tokio::task::spawn_blocking(move || {
+			checksum_file(algm, tmpdist_local_file, hash)
+		});
 		handle.await??;
 		info!(
-			"[{:}/{:}] Downloaded '{}'",
+			"[{}/{}] Downloaded '{}'",
 			f.1.0,
 			total_files,
-			path.display()
+			rel_path.display()
 		);
 	}
 	Ok(())
@@ -280,7 +311,6 @@ pub async fn download_metadata_files(
 		symlink(codename, symlink_file).await?;
 	}
 	let base_url = base_url.join(&format!("dists/{}/", suite))?;
-	let dst = dst.join(format!("dists-{}/{}/", timestamp, suite));
 	let mut queues = (0..parallel_jobs)
 		.map(|_| HashMap::<PathBuf, (u32, String)>::new())
 		.collect::<Vec<_>>();
@@ -322,12 +352,15 @@ pub async fn download_metadata_files(
 		let base_url = base_url.clone();
 		let dst = dst.clone();
 		let client = client.clone();
-		let algo = info.hash_algo.clone();
+		let suite = suite.clone();
+		let algo = info.hash_algo;
 		debug!("Spawning thread {} with {} files", i, q.len());
 		handles.push(tokio::spawn(async move {
-			download_metadata_inner(base_url, q, algo, dst, client, idx)
-				.await
-				.context("Unable to download metadata files")
+			download_metadata_inner(
+				base_url, q, algo, timestamp, dst, suite, client, idx,
+			)
+			.await
+			.context("Unable to download metadata files")
 		}));
 	}
 	let iter = handles.into_iter();
@@ -423,7 +456,7 @@ pub fn get_files(
 	archs: Vec<String>,
 	timestamp: i64,
 	num_queues: u8,
-) -> Result<Vec<PackageFileList>> {
+) -> Result<(HashSet<String>, Vec<PackageFileList>)> {
 	info!("Collecting files from {} dists ...", suites.len());
 	let mut files = Vec::new();
 	for suite in &suites {
@@ -463,15 +496,20 @@ pub fn get_files(
 			}
 		}
 	}
+	if files.is_empty() {
+		bail!("Internal error: No files collected");
+	}
 	files.sort();
+	let hashset: HashSet<String> = files.iter().cloned().collect();
 	info!("There are {} files currently known to us.", files.len());
 	// Distribute files
 	// It's better to split this list into chunks, rather than round-robin them.
 	// This is for reducing the server load (rsync treats file lists specially).
 	let mut queues = Vec::new();
 	let each_size = files.len().div_ceil(num_queues as usize);
-	files.chunks(each_size).for_each(|x| queues.push(x.to_vec()));
-	Ok(queues)
+	files.chunks(each_size)
+		.for_each(|x| queues.push(x.to_vec()));
+	Ok((hashset, queues))
 }
 
 #[tokio::test]

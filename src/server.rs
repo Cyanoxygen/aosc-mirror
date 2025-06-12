@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::{AppState, sync::do_sync};
 
-#[derive(Copy, Clone, Deserialize, Serialize, Debug)]
+#[derive(Copy, Clone, Deserialize, PartialEq, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
 	Success,

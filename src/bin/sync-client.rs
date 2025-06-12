@@ -1,9 +1,10 @@
 use std::{fs::read_to_string, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use aosc_mirror::{metadata::split_inrelease, *};
+use aosc_mirror::{metadata::split_inrelease, server::Status, sync::do_sync_inner, *};
 
-use anyhow::{Context, Ok, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::prelude::*;
+use chrono::Utc;
 use clap::{Parser, Subcommand, command};
 use config::AppConfig;
 use ed25519_dalek::VerifyingKey;
@@ -11,13 +12,16 @@ use log::{error, info};
 use metadata::fetch_manifest;
 use reqwest::{Client, redirect::Policy};
 use server::build_server;
-use tokio::{net::TcpListener, sync::RwLock, task::JoinSet};
+use tokio::{
+	fs::{rename, symlink},
+	net::TcpListener,
+	sync::RwLock,
+	task::JoinSet,
+};
 use verify::{init_pgp_keyringstore, verify_pgp_signature};
 
 use crate::{config::check_config, metadata::AptRepoReleaseInfo};
 pub use server::SyncRequestBody;
-
-
 
 #[derive(Clone, Subcommand)]
 /// The Mirror Sync Client
@@ -101,7 +105,7 @@ async fn main() -> Result<()> {
 	// Download the InRelease files before starting, and make sure it can be verified
 	// by the keys from the given keystore.
 	info!("Checking the validity of the repository metadata ...");
-	let mut errors = Vec::new();
+	let mut errors = Vec::<anyhow::Error>::new();
 	for suite in &config.suites {
 		if let Err(e) = {
 			info!(
@@ -165,34 +169,64 @@ async fn main() -> Result<()> {
 		)
 	}
 
-	// Start the server
-	info!("Starting server ...");
+	let now = Utc::now().timestamp();
+	// Prepare the dists/ directory
+	// If dists/ is a directory, move it to dists-{cur_timestamp} and make a symlink to that.
+	let dists = config.mirror_root.join("dists");
+	if dists.exists() && !dists.is_symlink() && dists.is_dir() {
+		info!("Replacing dists/ with a symlink to dists-{}/ ...", now - 1);
+		let new_name = config.mirror_root.join(format!("dists-{}", now - 1));
+		rename(&dists, &new_name)
+			.await
+			.context(format!("Unable to move dists/ to {}/", new_name.display()))?;
+		symlink(&new_name, &dists).await.context(format!(
+			"Unable to create symlink at {} -> {}",
+			dists.display(),
+			new_name.display()
+		))?;
+	}
 
 	// Mutable shared state to share across different async tasks.
 	let state = Arc::new(RwLock::new(AppState {
 		syncing: false,
 		config: config.clone(),
-		last_sync_timestamp: 0,
+		last_sync_timestamp: now,
 		last_sync_status: server::Status::Success,
 		last_sync_message: String::new(),
 		server_pubkeys,
 		keyring_store,
 		client,
 	}));
-	let s = build_server(state).into_make_service_with_connect_info::<SocketAddr>();
-	let mut tasks = JoinSet::new();
-	// let mut tasks = Vec::new();
-	for addr in &config.listen {
-		let listener = TcpListener::bind(addr)
-			.await
-			.context(format!("Failed to bind to {}", addr))?;
-		info!("Listening on {}", addr);
-		let s = s.clone();
-		tasks.spawn(async move { axum::serve(listener, s).await });
-	}
-	info!("Sync server started, waiting for requests ...");
-	while let Some(r) = tasks.join_next().await {
-		r??;
+	match cmdline.action {
+		AppAction::Daemon => {
+			// Start the server
+			info!("Starting server ...");
+			let s = build_server(state)
+				.into_make_service_with_connect_info::<SocketAddr>();
+			let mut tasks = JoinSet::new();
+			// let mut tasks = Vec::new();
+			for addr in &config.listen {
+				let listener = TcpListener::bind(addr)
+					.await
+					.context(format!("Failed to bind to {}", addr))?;
+				info!("Listening on {}", addr);
+				let s = s.clone();
+				tasks.spawn(async move { axum::serve(listener, s).await });
+			}
+			info!("Sync server started, waiting for requests ...");
+			while let Some(r) = tasks.join_next().await {
+				r??;
+			}
+		}
+		AppAction::Sync => {
+			do_sync_inner(state.clone(), now).await;
+			let lock = state.read().await;
+			if lock.last_sync_status == Status::Failed {
+				let e = anyhow!(lock.last_sync_message.clone())
+					.context("Sync job failed");
+				bail!(e);
+			}
+		}
 	}
 	Ok(())
 }

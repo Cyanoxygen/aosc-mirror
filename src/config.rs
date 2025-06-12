@@ -1,5 +1,5 @@
 use std::{
-	fs::{self},
+	fs::{self, File, create_dir_all, remove_file},
 	net::SocketAddr,
 	path::PathBuf,
 };
@@ -135,6 +135,36 @@ pub fn check_config(config: &AppConfig) -> Vec<anyhow::Error> {
 	}
 	if config.server_pubkeys.is_empty() && !config.skip_verification {
 		errors.push(anyhow!("Public keys from mirror origin servers required"));
+	}
+	if config.mirror_root.exists() {
+		if !config.mirror_root.is_dir() {
+			errors.push(anyhow!(
+				"Specified irror root {} is not a directory",
+				config.mirror_root.display()
+			));
+		}
+		if let Err(e) = create_dir_all(&config.mirror_root) {
+			errors.push(anyhow!(
+				"Can't create the mirror root directory {}: {}",
+				config.mirror_root.display(),
+				e
+			));
+		}
+	}
+	let path = config.mirror_root.join(".testfile");
+	if let Err(e) = File::create_new(&path) {
+		errors.push(anyhow!(
+			"Can't write to {}: {} - Check permissions",
+			config.mirror_root.display(),
+			e
+		));
+	}
+	if let Err(e) = remove_file(&path) {
+		errors.push(anyhow!(
+			"Can't remove the test file {}: {}",
+			config.mirror_root.display(),
+			e
+		));
 	}
 	errors
 }
