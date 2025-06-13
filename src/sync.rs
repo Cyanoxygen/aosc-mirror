@@ -229,6 +229,7 @@ async fn do_sync_inner2(j: SyncJob<'_>) -> Result<()> {
 
 	// Fire up N instances of rsync
 	let mut handles = Vec::new();
+	info!("Starting up {} rsync instances ...", j.threads);
 	for list in filelists {
 		let rsync_url = rsync_url.clone();
 		let dst = j.dst.to_path_buf();

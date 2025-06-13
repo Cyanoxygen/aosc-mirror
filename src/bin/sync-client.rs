@@ -1,4 +1,4 @@
-use std::{fs::read_to_string, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{env, fs::read_to_string, net::SocketAddr, path::{Path, PathBuf}, sync::Arc};
 
 use aosc_mirror::{metadata::split_inrelease, server::Status, sync::do_sync_inner, *};
 
@@ -43,6 +43,20 @@ pub struct Cmdline {
 	pub action: AppAction,
 }
 
+fn check_repo(root: &dyn AsRef<Path>, manifests: Vec<AptRepoReleaseInfo>) -> bool {
+	for manifest in manifests {
+		let suite_dir = root.as_ref().join("dists").join(manifest.suite);
+		let files = manifest.metadata_info.iter().next().unwrap();
+		for f in &files.files {
+			let full_path = suite_dir.join(&f.path);
+			if !full_path.is_file() {
+				return false;
+			}
+		}
+	}
+	true
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
 	env_logger::init();
@@ -59,6 +73,7 @@ async fn main() -> Result<()> {
 		}
 	};
 	let config_file = &cmdline.config_file;
+	let argv0 = env::args().next().unwrap_or("sync-client".into());
 
 	let config: AppConfig = toml::from_str(&read_to_string(config_file)?)
 		.context("Unable to read the config file")?;
@@ -106,6 +121,7 @@ async fn main() -> Result<()> {
 	// by the keys from the given keystore.
 	info!("Checking the validity of the repository metadata ...");
 	let mut errors = Vec::<anyhow::Error>::new();
+	let mut manifests = Vec::new();
 	for suite in &config.suites {
 		if let Err(e) = {
 			info!(
@@ -148,6 +164,7 @@ async fn main() -> Result<()> {
 					info.archs
 				)));
 			};
+			manifests.push(info);
 			Ok(())
 		} {
 			errors.push(e);
@@ -199,6 +216,12 @@ async fn main() -> Result<()> {
 	}));
 	match cmdline.action {
 		AppAction::Daemon => {
+			info!("Checking the repository ...");
+			if !check_repo(&config.mirror_root, manifests) {
+				bail!("Looks like you don't have a full copy of the mirrored repository.\n".to_owned() + 
+				&"Please run the following command to initialize a full copy:\n\n".to_owned() +
+				&format!("{} -c {} sync", argv0, config_file.display()));
+			};
 			// Start the server
 			info!("Starting server ...");
 			let s = build_server(state)
